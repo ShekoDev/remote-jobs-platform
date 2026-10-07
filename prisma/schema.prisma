@@ -1,0 +1,272 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum RemoteStatus {
+  FULLY_REMOTE   // 100% remote, verified from listing text
+  HYBRID         // excluded from results
+  ONSITE         // excluded from results
+  UNKNOWN        // excluded until verified
+}
+
+enum EligibilityStatus {
+  YES
+  NO
+  UNKNOWN
+}
+
+enum ExperienceLevel {
+  NO_EXPERIENCE
+  ENTRY
+  JUNIOR
+  MID
+  SENIOR
+  LEAD
+  MANAGER
+  DIRECTOR
+  UNKNOWN
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  FREELANCE
+  TEMPORARY
+  INTERNSHIP
+  UNKNOWN
+}
+
+enum Education {
+  NO_DEGREE
+  HIGH_SCHOOL
+  DIPLOMA
+  BACHELORS
+  MASTERS
+  PHD
+  UNKNOWN
+}
+
+enum Verification {
+  VERIFIED
+  NEEDS_VERIFICATION
+  SUSPICIOUS
+}
+
+enum ApplicationStatus {
+  ACCEPTING
+  CLOSED
+  UNKNOWN
+}
+
+enum CompanyType {
+  STARTUP
+  SMALL
+  MEDIUM
+  ENTERPRISE
+  GOVERNMENT
+  NGO
+  UNKNOWN
+}
+
+enum TrackerStatus {
+  SAVED
+  READY_TO_APPLY
+  APPLIED
+  ASSESSMENT
+  INTERVIEW
+  OFFER
+  REJECTED
+}
+
+enum AlertFrequency {
+  INSTANT
+  DAILY
+  WEEKLY
+}
+
+// ---------- Core job data ----------
+
+/// A canonical (de-duplicated) job. One row per real opening, regardless
+/// of how many boards list it. Every field comes from a source listing;
+/// unknown values are stored as UNKNOWN / null, never guessed.
+model Job {
+  id              String   @id @default(cuid())
+  fingerprint     String   @unique // normalized company + title, used for dedupe
+
+  title           String
+  company         String
+  companyLogo     String?
+  companyUrl      String?
+  companyType     CompanyType @default(UNKNOWN)
+  companyCountry  String?     // ISO-2 or region label as stated by the source
+
+  description     String   // sanitized plain text
+  category        String   // taxonomy slug: data, admin, customer_service, ...
+  subCategory     String?  // e.g. "Data Entry", "Virtual Assistant"
+
+  remoteStatus    RemoteStatus
+  remoteEvidence  String?  // the phrase that justified remoteStatus
+
+  /// Region/country tags the listing explicitly allows, e.g. ["WORLDWIDE"], ["EG","SA"], ["EMEA"]
+  eligibleRegions String[]
+  egyptEligible   EligibilityStatus @default(UNKNOWN)
+  eligibilityNote String?
+
+  experience      ExperienceLevel @default(UNKNOWN)
+  employmentType  EmploymentType  @default(UNKNOWN)
+  education       Education       @default(UNKNOWN)
+
+  salaryMin       Int?
+  salaryMax       Int?
+  salaryCurrency  String?  // USD, EUR, GBP, SAR, AED, EGP
+  salaryPeriod    String?  // hour | month | year
+  salaryHourlyUsd Int?     // normalized for filters/sorting; null when not disclosed
+
+  skills          String[]
+  languages       String[] // ["English", "Arabic"]
+  arabicRequired  Boolean  @default(false)
+  englishRequired Boolean  @default(false)
+
+  postedAt        DateTime
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @default(now())
+  lastVerifiedAt  DateTime?
+  expiresAt       DateTime?
+
+  verification    Verification      @default(NEEDS_VERIFICATION)
+  applicationStatus ApplicationStatus @default(UNKNOWN)
+  trustScore      Int      @default(50)
+  trustReasons    String[]
+  scamFlags       String[] // non-empty => hidden from results
+  closedReason    String?
+
+  applyUrl        String   // preferred apply link (official company page when known)
+  applyUrlIsOfficial Boolean @default(false)
+
+  listings        JobListing[]
+  saved           SavedJob[]
+  applications    Application[]
+  verifications   VerificationLog[]
+
+  @@index([postedAt])
+  @@index([category])
+  @@index([egyptEligible])
+  @@index([applicationStatus, remoteStatus])
+  @@index([salaryHourlyUsd])
+  @@index([company])
+}
+
+/// One row per (source, external id). Several listings can point to one Job.
+model JobListing {
+  id          String   @id @default(cuid())
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  sourceId    String   // remotive | remoteok | jobicy | ...
+  externalId  String
+  url         String
+  rawTitle    String
+  rawLocation String?
+  rawPayload  Json?
+  seenAt      DateTime @default(now())
+  isAlive     Boolean  @default(true)
+
+  @@unique([sourceId, externalId])
+  @@index([jobId])
+}
+
+model Source {
+  id           String   @id // remotive, remoteok, ...
+  name         String
+  kind         String   // api | rss | career_page
+  homepage     String
+  enabled      Boolean  @default(true)
+  lastRunAt    DateTime?
+  lastRunOk    Boolean?
+  lastRunNote  String?
+  totalIngested Int     @default(0)
+}
+
+model VerificationLog {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  checkedAt DateTime @default(now())
+  result    ApplicationStatus
+  httpStatus Int?
+  note      String?
+
+  @@index([jobId, checkedAt])
+}
+
+// ---------- Per-user data (anonymous cookie-keyed) ----------
+
+model SavedJob {
+  id        String   @id @default(cuid())
+  userKey   String
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userKey, jobId])
+  @@index([userKey])
+}
+
+model Application {
+  id         String        @id @default(cuid())
+  userKey    String
+  jobId      String
+  job        Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  status     TrackerStatus @default(SAVED)
+  appliedAt  DateTime?
+  notes      String?
+  updatedAt  DateTime      @updatedAt
+  createdAt  DateTime      @default(now())
+
+  @@unique([userKey, jobId])
+  @@index([userKey])
+}
+
+model SavedSearch {
+  id        String   @id @default(cuid())
+  userKey   String
+  name      String
+  filters   Json
+  createdAt DateTime @default(now())
+
+  @@index([userKey])
+}
+
+model JobAlert {
+  id         String         @id @default(cuid())
+  userKey    String
+  email      String
+  name       String
+  filters    Json
+  frequency  AlertFrequency @default(DAILY)
+  active     Boolean        @default(true)
+  lastSentAt DateTime?
+  createdAt  DateTime       @default(now())
+
+  @@index([userKey])
+}
+
+/// Optional: profile used for Match Score. Stored per anonymous user key.
+model UserProfile {
+  userKey     String   @id
+  country     String   @default("EG")
+  skills      String[]
+  experience  ExperienceLevel @default(ENTRY)
+  languages   String[] @default(["English", "Arabic"])
+  minHourlyUsd Int?
+  categories  String[]
+  education   Education @default(UNKNOWN)
+  updatedAt   DateTime @updatedAt
+}
